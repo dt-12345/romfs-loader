@@ -1,0 +1,11 @@
+.vscode/*
+.cache/*
+build/*
+out/*
+deploy/*
+.clangd
+compile_commands.json
+
+*.elf
+*.nso
+*.npdm
