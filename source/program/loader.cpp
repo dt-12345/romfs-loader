@@ -1,7 +1,7 @@
 #include "bloomfilter.hpp"
 #include "loader.hpp"
+#include "accessor.hpp"
 
-#include "fs/fs_types.hpp"
 #include "lib.hpp"
 #include "nn.hpp"
 
@@ -25,7 +25,7 @@ static size_t sContentMountPointLength = 7;
 HOOK_DEFINE_TRAMPOLINE(MountRom) {
     static Result Callback(const char* mountPoint, void* cache, size_t cacheSize) {
         const auto res = Orig(mountPoint, cache, cacheSize);
-        if (res == 0) {
+        if (R_SUCCEEDED(res)) {
             sContentMountPoint = mountPoint;
             sContentMountPointLength = strlen(sContentMountPoint);
         }
@@ -62,6 +62,20 @@ static nn::os::ReaderWriterLock gFilterLock = nn::os::ReaderWriterLock();
 using Filter = BloomFilter<0x1'8000, 16>; // we'll round them up to nicer numbers
 static Filter gPathFilter;
 
+static bool InFilter(const char* path) {
+    if (path == nullptr) {
+        return false;
+    }
+    const auto size = strlen(path);
+    if (size < 1) {
+        return false;
+    }
+#ifdef ENABLE_HOT_RELOAD
+    const auto _ = std::shared_lock(gFilterLock);
+#endif
+    return gPathFilter.contains({ path, path[size - 1] == '/' ? size - 1 : size });
+}
+
 static bool CheckPrefix(const char* str, const char* prefix) {
     if (str == nullptr || prefix == nullptr) {
         return false;
@@ -74,6 +88,26 @@ static bool CheckPrefix(const char* str, const char* prefix) {
     return true;
 }
 
+static size_t JoinPath(char* out, size_t outSize, const char* part1, const char* part2) {
+    const auto len1 = strlen(part1);
+    size_t length = len1 >= outSize ? outSize : len1;
+    memcpy(out, part1, length);
+    if (length + 1 >= outSize) {
+        out[outSize - 1] = '\0';
+        return outSize - 1;
+    }
+    if (part1[len1 - 1] != '/') {
+        out[length++] = '/';
+    }
+    const auto remaining = length >= outSize ? 0 : outSize - length;
+    const auto len2 = strlen(part2);
+    memcpy(out + length, part2, len2 >= remaining? remaining : len2);
+    length += len2;
+    length = length >= outSize - 1 ? outSize - 1 : length;
+    out[length] = '\0';
+    return length;
+}
+
 // not sure if there's a great solution to handling OpenDirectory without meddling with the internal DirectoryAccessor class
 // the other option is to hook any place where the game is iterating through directories and handle it there, but that's less generic
 
@@ -83,25 +117,13 @@ HOOK_DEFINE_TRAMPOLINE(OpenFile) {
             return Orig(outHandle, path, mode);
         }
         const char* rawPath = path + sContentMountPointLength + sizeof(cMountDelimiter) - 1;
-        const auto size = strlen(rawPath);
-        bool inFilter;
-#ifdef ENABLE_HOT_RELOAD
-        {
-            // const auto _ = std::scoped_lock(gFilterLock);
-            const auto _ = std::shared_lock(gFilterLock);
-#endif
-            inFilter = gPathFilter.contains({ rawPath, size });
-#ifdef ENABLE_HOT_RELOAD
-        }
-#endif
-        if (!inFilter) {
+        if (!InFilter(rawPath)) {
             return Orig(outHandle, path, mode);
         }
         char newpath[nn::fs::MaxDirectoryEntryNameSize + 1];
-        const auto s = nn::util::SNPrintf(newpath, sizeof(newpath), "%s/%s", cRomfsDirectory, rawPath);
-        newpath[s] = '\0';
+        JoinPath(newpath, sizeof(newpath), cRomfsDirectory, rawPath);
         const auto res = Orig(outHandle, newpath, mode);
-        if (res == 0) {
+        if (R_SUCCEEDED(res)) {
             return res;
         }
         // maybe it was a false positive, maybe the file really doesn't exist
@@ -110,10 +132,41 @@ HOOK_DEFINE_TRAMPOLINE(OpenFile) {
     }
 };
 
-// TODO: when we get to handling OpenDirectory, replace the call here with the original
+HOOK_DEFINE_TRAMPOLINE(OpenDirectory) {
+    static Result Callback(nn::fs::DirectoryHandle* outHandle, const char* path, int mode) {
+        if (!CheckPrefix(path, sContentMountPoint) || !CheckPrefix(path + sContentMountPointLength, cMountDelimiter)) {
+            return Orig(outHandle, path, mode);
+        }
+        R_UNLESS(outHandle != nullptr, nn::fs::ResultNullptrArgument());
+        const char* rawPath = path + sContentMountPointLength + sizeof(cMountDelimiter) - 1;
+        if (!InFilter(rawPath)) {
+            return Orig(outHandle, path, mode);
+        }
+        char newpath[nn::fs::MaxDirectoryEntryNameSize + 1];
+        JoinPath(newpath, sizeof(newpath), cRomfsDirectory, rawPath);
+        nn::fs::DirectoryHandle handle1;
+        const auto res1 = Orig(&handle1, newpath, mode);
+        if (R_SUCCEEDED(res1)) {
+            nn::fs::DirectoryHandle handle2;
+            const auto res2 = Orig(&handle2, path, mode);
+            if (R_SUCCEEDED(res2)) {
+                nn::fs::detail::FileSystemAccessor* fsa;
+                const char* fs_path;
+                R_TRY(nn::fs::detail::FindFileSystem(&fsa, &fs_path, path));
+                outHandle->_internal = reinterpret_cast<u64>(new nn::fs::detail::DirectoryAccessor(std::make_unique<MergedDirectory>(handle1, handle2), *fsa));
+                R_SUCCEED();
+            } else { // this directory only exists in the mod
+                *outHandle = handle1;
+                R_SUCCEED();
+            }
+        }
+        return Orig(outHandle, path, mode);
+    }
+};
+
 static void ProcessDirectoryRecursive(const char* path) {
     nn::fs::DirectoryHandle handle{};
-    if (nn::fs::OpenDirectory(&handle, path, nn::fs::OpenDirectoryMode_All) != 0) {
+    if (OpenDirectory::Orig(&handle, path, nn::fs::OpenDirectoryMode_All) != 0) {
         return;
     }
     s64 count = 0;
@@ -127,26 +180,42 @@ static void ProcessDirectoryRecursive(const char* path) {
             continue;
         }
         char subpath[nn::fs::MaxDirectoryEntryNameSize + 1];
-        const auto size = nn::util::SNPrintf(subpath, sizeof(subpath), "%s/%s", path, entry.m_Name);
-        subpath[size] = '\0';
+        const auto size = JoinPath(subpath, sizeof(subpath), path, entry.m_Name);
         if (entry.m_Type == nn::fs::DirectoryEntryType_Directory) {
             ProcessDirectoryRecursive(subpath);
-        } else {
-            if (static_cast<std::size_t>(size) < sizeof(cRomfsDirectory) + 1) {
-                continue;
-            }
-#ifdef ENABLE_HOT_RELOAD
-            const auto _ = std::scoped_lock(gFilterLock);
-#endif
-            // no size - 1 here bc the directory path doesn't include /
-            gPathFilter.add({ subpath + sizeof(cRomfsDirectory), static_cast<std::size_t>(size - sizeof(cRomfsDirectory)) });
         }
+        if (size < sizeof(cRomfsDirectory) + 1) {
+            continue;
+        }
+#ifdef ENABLE_HOT_RELOAD
+        const auto _ = std::scoped_lock(gFilterLock);
+#endif
+        // no size - 1 here bc the directory path doesn't include /
+        gPathFilter.add({ subpath + sizeof(cRomfsDirectory), static_cast<std::size_t>(size - sizeof(cRomfsDirectory)) });
     }
 }
 
 #ifdef ENABLE_HOT_RELOAD
-static nn::os::ThreadType gIndexerThread;
-alignas(nn::os::ThreadStackAlignment) static char gIndexerThreadStack[0x5000];
+class Thread {
+public:
+    Thread() = default;
+
+    void Initialize(const char* name, nn::os::ThreadFunction func, void* arg, int priority) {
+        nn::os::CreateThread(&mThread, func, arg, mStack, sizeof(mStack), priority);
+        nn::os::SetThreadName(&mThread, name);
+        nn::os::StartThread(&mThread);
+    }
+
+    ~Thread() {
+        nn::os::DestroyThread(&mThread);
+    }
+
+private:
+    alignas(nn::os::ThreadStackAlignment) char mStack[0x5000];
+    nn::os::ThreadType mThread;
+};
+
+static Thread gIndexerThread;
 
 static void ThreadMain(void*) {
     for (;;) {
@@ -157,9 +226,7 @@ static void ThreadMain(void*) {
 }
 
 static void InitializeIndexerThread() {
-    nn::os::CreateThread(&gIndexerThread, ThreadMain, nullptr, gIndexerThreadStack, sizeof(gIndexerThreadStack), 1);
-    nn::os::SetThreadName(&gIndexerThread, "Indexer");
-    nn::os::StartThread(&gIndexerThread);
+    gIndexerThread.Initialize("Indexer", ThreadMain, nullptr, 1);
 }
 #endif
 
@@ -169,10 +236,11 @@ void InitializeLoader() {
         return;
     }
 
-    ProcessDirectoryRecursive(cRomfsDirectory);
-
     MountRom::InstallAtFuncPtr(nn::fs::MountRom);
     OpenFile::InstallAtFuncPtr(nn::fs::OpenFile);
+    OpenDirectory::InstallAtFuncPtr(nn::fs::OpenDirectory);
+
+    ProcessDirectoryRecursive(cRomfsDirectory);
 
 #ifdef ENABLE_HOT_RELOAD
     InitializeIndexerThread();

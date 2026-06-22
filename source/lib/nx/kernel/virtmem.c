@@ -235,7 +235,7 @@ void* virtmemFindCodeMemory(size_t size, size_t guard_size) {
     return _memregionFindRandom(g_IsLegacyKernel ? &g_StackRegion : &g_AslrRegion, size, guard_size);
 }
 
-#define NUM_RESERVATIONS 4
+#define NUM_RESERVATIONS 5
 static VirtmemReservation sReservations[NUM_RESERVATIONS];
 static size_t sCurrentIndex = 0;
 
