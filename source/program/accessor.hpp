@@ -124,14 +124,13 @@ namespace nn::fs {
 
 } // namespace nn::fs
 
-[[gnu::always_inline]] inline nn::fs::detail::DirectoryAccessor* Get(nn::fs::DirectoryHandle handle) {
-    return reinterpret_cast<nn::fs::detail::DirectoryAccessor*>(handle._internal);
-}
-
 class MergedDirectory : public nn::fs::fsa::IDirectory, public nn::fs::detail::Newable {
 public:
     MergedDirectory(nn::fs::DirectoryHandle handle1, nn::fs::DirectoryHandle handle2) : mHandle1(handle1), mHandle2(handle2) {}
-    ~MergedDirectory() override {}
+    ~MergedDirectory() override {
+        nn::fs::CloseDirectory(mHandle1);
+        nn::fs::CloseDirectory(mHandle2);
+    }
 
 private:
     Result DoRead(s64 *out_count, nn::fs::DirectoryEntry *out_entries, s64 max_entries) override {
@@ -147,19 +146,15 @@ private:
         }
         R_TRY(nn::fs::ReadDirectory(&count2, entries, mHandle2, remaining));
         remaining = count2 >= remaining ? 0 : remaining - count2;
-        entries += count2;
-        *out_count = max_entries;
+        *out_count = max_entries - remaining;
         R_SUCCEED();
     }
 
     Result DoGetEntryCount(s64 *out) override {
-        s64 count = 0;
         s64 count1, count2;
         R_TRY(nn::fs::GetDirectoryEntryCount(&count1, mHandle1));
-        count += count1;
         R_TRY(nn::fs::GetDirectoryEntryCount(&count2, mHandle2));
-        count += count2;
-        *out = count;
+        *out = count1 + count2;
         R_SUCCEED();
     }
 
