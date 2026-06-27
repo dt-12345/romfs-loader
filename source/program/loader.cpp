@@ -150,9 +150,15 @@ HOOK_DEFINE_TRAMPOLINE(OpenDirectory) {
             if (R_SUCCEEDED(res2)) {
                 nn::fs::detail::FileSystemAccessor* fsa;
                 const char* fs_path;
-                R_TRY(nn::fs::detail::FindFileSystem(&fsa, &fs_path, path));
-                outHandle->_internal = reinterpret_cast<u64>(new nn::fs::detail::DirectoryAccessor(std::make_unique<MergedDirectory>(handle1, handle2), *fsa));
-                R_SUCCEED();
+                const auto res = nn::fs::detail::FindFileSystem(&fsa, &fs_path, path);
+                if (R_SUCCEEDED(res)) {
+                    outHandle->_internal = reinterpret_cast<u64>(new nn::fs::detail::DirectoryAccessor(std::make_unique<MergedDirectory>(handle1, handle2), *fsa));
+                    R_SUCCEED();
+                } else {
+                    nn::fs::CloseDirectory(handle1);
+                    nn::fs::CloseDirectory(handle2);
+                    return res;
+                }
             } else { // this directory only exists in the mod
                 *outHandle = handle1;
                 R_SUCCEED();
