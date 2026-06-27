@@ -175,6 +175,7 @@ static void ProcessDirectoryRecursive(const char* path) {
     }
     s64 count = 0;
     if (nn::fs::GetDirectoryEntryCount(&count, handle) != 0) {
+        nn::fs::CloseDirectory(handle);
         return;
     }
     s64 readCount = 0;
@@ -197,6 +198,8 @@ static void ProcessDirectoryRecursive(const char* path) {
         // no size - 1 here bc the directory path doesn't include /
         gPathFilter.add({ subpath + sizeof(cRomfsDirectory), static_cast<std::size_t>(size - sizeof(cRomfsDirectory)) });
     }
+
+    nn::fs::CloseDirectory(handle);
 }
 
 #ifdef ENABLE_HOT_RELOAD
