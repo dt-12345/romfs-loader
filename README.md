@@ -5,14 +5,18 @@ this is largely inspired by [ultracam](https://gamebanana.com/mods/480138)'s rom
 romfs files are loaded from `sd:/atmosphere/contents/<title_id>/romfslite/` if present
 
 limitations:
-- directory iteration is unhandled (i.e. if a game calls `nn::fs::OpenDirectory`, it does not receive a merged view of the romfs directory and the romfslite directory)
-  - most games should not do this so hopefully this is fine
+- `nn::fs::OpenDirectory` provides a merged view of the mod directory and normal directory without de-duplicating entries
+  - this should not cause any issues unless a game explicitly relies on the file count since opening a file will resolve it correctly
 
 the loader is implemented as a zero-allocation bloom filter built from the files present in the romfslite directory
 
 with the default bloom filter parameters, this gives a ~0.01% false positive rate with 5000 files in the mod and ~12kb of memory consumption
 
 by default, hot reloading of files is enabled - this spawns an indexer thread that re-indexes the romfslite directory every 5 seconds
+
+currently configured for totk, but this should work generically for any game that may require this
+
+to port to a different game, edit the title id in `config.json` and the program id in `config.mk`
 
 # exlaunch
 A framework for injecting C/C++ code into Nintendo Switch applications/applet/sysmodules.

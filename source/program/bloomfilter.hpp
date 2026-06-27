@@ -19,7 +19,7 @@ public:
     }
 
     void add(std::string_view data) {
-        auto hash = CalcHash(data);
+        const auto hash = CalcHash(data);
 
         for (std::size_t n = 0; n < HASH_FUNCTION_COUNT; ++n) {
             mFilter.set(BitIndex(n, hash[0], hash[1]));
@@ -27,7 +27,7 @@ public:
     }
 
     bool contains(std::string_view data) const {
-        auto hash = CalcHash(data);
+        const auto hash = CalcHash(data);
 
         for (std::size_t n = 0; n < HASH_FUNCTION_COUNT; ++n) {
             if (!mFilter.test(BitIndex(n, hash[0], hash[1]))) {

@@ -14,7 +14,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "fs/fs_types.hpp"
 #include "intrusive_list.hpp"
 
 #include "common.hpp"

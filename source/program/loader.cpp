@@ -7,13 +7,11 @@
 
 #define ENABLE_HOT_RELOAD
 
-#include <array>
 #ifdef ENABLE_HOT_RELOAD
 #include <mutex>
 #include <shared_mutex>
 #endif
 #include <string.h>
-#include <string>
 
 constexpr const char cSDCardMountPoint[] = "sd";
 constexpr const char cRomfsDirectory[] = "sd:/atmosphere/contents/" STRINGIFY(EXL_PROGRAM_ID) "/romfslite";
